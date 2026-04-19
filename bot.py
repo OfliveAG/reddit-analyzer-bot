@@ -7,7 +7,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 USER_AGENT = "SubredditAnalyzerTelegram/4.0 (by /u/Aggravating_Lock_666)"
-BASE = "https://api.reddit.com""
+BASE = "https://api.reddit.com"
 
 def fetch(url, params=None):
     for attempt in range(3):

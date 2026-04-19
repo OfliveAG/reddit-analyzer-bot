@@ -9,39 +9,41 @@ from datetime import datetime, timezone
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-USER_AGENT = "SubredditAnalyzerTelegram/5.0 (by /u/Aggravating_Lock_666)"
-BASE = "https://api.reddit.com"
+USER_AGENT = "SubredditAnalyzerTelegram/6.0 (by /u/Aggravating_Lock_666)"
+API_BASE = "https://api.reddit.com"
+WEB_BASE = "https://www.reddit.com"
 SAMPLE_LIMIT = 12
 MIN_POST_AGE_HOURS = 3
+
+def _do_get(base, url, params=None):
+    r = requests.get(
+        f"{base}{url}",
+        headers={
+            "User-Agent": USER_AGENT,
+            "Accept": "application/json"
+        },
+        params=params,
+        timeout=15
+    )
+    print(f"[FETCH] {base}{url} | status={r.status_code}")
+    r.raise_for_status()
+    return r.json()
 
 def fetch(url, params=None):
     for attempt in range(3):
         try:
             time.sleep(random.uniform(1.2, 1.8))
-            r = requests.get(
-                f"{BASE}{url}",
-                headers={
-                    "User-Agent": USER_AGENT,
-                    "Accept": "application/json"
-                },
-                params=params,
-                timeout=15
-            )
-
-            print(f"[FETCH] {url} | status={r.status_code}")
-
-            if r.status_code == 429:
-                wait_s = 10 * (attempt + 1)
-                print(f"[FETCH] Rate limited, waiting {wait_s}s")
-                time.sleep(wait_s)
-                continue
-
-            r.raise_for_status()
-            return r.json()
-
+            try:
+                return _do_get(API_BASE, url, params=params)
+            except Exception as e_api:
+                print(f"[FETCH API ERROR] {url} | {e_api}")
+                time.sleep(0.5)
+                return _do_get(WEB_BASE, url, params=params)
         except Exception as e:
             print(f"[FETCH ERROR] {url} | attempt={attempt+1} | error={e}")
-
+            if "429" in str(e):
+                wait_s = 10 * (attempt + 1)
+                time.sleep(wait_s)
     return None
 
 def clean_subreddit_name(subreddit):
@@ -160,7 +162,7 @@ def lookup_user(username):
     pk = d.get("link_karma", 0)
     ck = d.get("comment_karma", 0)
     total = pk + ck
-    created_utc = d["created_utc"]
+    created_utc = d["data"]["created_utc"] if "data" in d else d["created_utc"]
 
     return {
         "u": username,

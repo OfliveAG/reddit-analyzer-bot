@@ -9,15 +9,15 @@ from datetime import datetime, timezone
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-USER_AGENT = "SubredditAnalyzerTelegram/7.0 (by /u/Aggravating_Lock_666)"
+USER_AGENT = "SubredditAnalyzerTelegram/8.0 (by /u/Aggravating_Lock_666)"
 API_BASE = "https://api.reddit.com"
 WEB_BASE = "https://www.reddit.com"
 SAMPLE_LIMIT = 12
 MIN_POST_AGE_HOURS = 3
 
-# OPTIONAL:
 # Wenn leer, darf jeder den Bot nutzen.
-# Wenn IDs eingetragen sind, nur diese Nutzer.
+# Beispiel:
+# ALLOWED_USERS = [123456789, 987654321]
 ALLOWED_USERS = []
 
 def _do_get(base, url, params=None):
@@ -49,6 +49,23 @@ def fetch(url, params=None):
             if "429" in str(e):
                 wait_s = 5 * (attempt + 1)
                 time.sleep(wait_s)
+    return None
+
+def get_subreddit_info(subreddit):
+    try:
+        data = _do_get(API_BASE, f"/r/{subreddit}/about.json")
+        if data and "data" in data:
+            return data
+    except Exception as e:
+        print(f"[SUB INFO API ERROR] {subreddit} | {e}")
+
+    try:
+        data = _do_get(WEB_BASE, f"/r/{subreddit}/about.json")
+        if data and "data" in data:
+            return data
+    except Exception as e:
+        print(f"[SUB INFO WEB ERROR] {subreddit} | {e}")
+
     return None
 
 def clean_subreddit_name(subreddit):
@@ -284,11 +301,7 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(f"Working on r/{subreddit}...")
 
-    # Für echte Subscriber-Zahlen bevorzugt WEB_BASE
-    try:
-        sub_info = _do_get(WEB_BASE, f"/r/{subreddit}/about.json")
-    except Exception:
-        sub_info = fetch(f"/r/{subreddit}/about.json")
+    sub_info = get_subreddit_info(subreddit)
 
     if not sub_info or "data" not in sub_info:
         await update.message.reply_text(f"Could not fetch r/{subreddit}")

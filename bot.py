@@ -9,11 +9,16 @@ from datetime import datetime, timezone
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-USER_AGENT = "SubredditAnalyzerTelegram/6.0 (by /u/Aggravating_Lock_666)"
+USER_AGENT = "SubredditAnalyzerTelegram/7.0 (by /u/Aggravating_Lock_666)"
 API_BASE = "https://api.reddit.com"
 WEB_BASE = "https://www.reddit.com"
 SAMPLE_LIMIT = 12
 MIN_POST_AGE_HOURS = 3
+
+# OPTIONAL:
+# Wenn leer, darf jeder den Bot nutzen.
+# Wenn IDs eingetragen sind, nur diese Nutzer.
+ALLOWED_USERS = []
 
 def _do_get(base, url, params=None):
     r = requests.get(
@@ -32,26 +37,30 @@ def _do_get(base, url, params=None):
 def fetch(url, params=None):
     for attempt in range(3):
         try:
-            time.sleep(random.uniform(1.2, 1.8))
+            time.sleep(random.uniform(0.4, 0.8))
             try:
                 return _do_get(API_BASE, url, params=params)
             except Exception as e_api:
                 print(f"[FETCH API ERROR] {url} | {e_api}")
-                time.sleep(0.5)
+                time.sleep(0.2)
                 return _do_get(WEB_BASE, url, params=params)
         except Exception as e:
             print(f"[FETCH ERROR] {url} | attempt={attempt+1} | error={e}")
             if "429" in str(e):
-                wait_s = 10 * (attempt + 1)
+                wait_s = 5 * (attempt + 1)
                 time.sleep(wait_s)
     return None
 
 def clean_subreddit_name(subreddit):
-    subreddit = subreddit.replace("https://www.reddit.com/r/", "")
-    subreddit = subreddit.replace("https://reddit.com/r/", "")
-    subreddit = subreddit.replace("r/", "")
-    subreddit = subreddit.strip().strip("/")
-    return subreddit
+    subreddit = subreddit.strip()
+
+    if subreddit.startswith("r/"):
+        return subreddit[2:]
+
+    if "/r/" in subreddit:
+        return subreddit.split("/r/")[-1].strip("/")
+
+    return subreddit.strip("/")
 
 def human_age(ts):
     if not ts:
@@ -71,7 +80,7 @@ def format_num(n):
     except Exception:
         return "N/A"
 
-def get_subreddit_rules(subreddit, max_rules=5):
+def get_subreddit_rules(subreddit, max_rules=20):
     data = fetch(f"/r/{subreddit}/about/rules.json")
     if not data:
         return []
@@ -80,9 +89,13 @@ def get_subreddit_rules(subreddit, max_rules=5):
     cleaned = []
 
     for rule in rules[:max_rules]:
-        short_name = rule.get("short_name") or rule.get("violation_reason") or rule.get("description")
-        if short_name:
-            cleaned.append(short_name.strip())
+        rule_text = (
+            rule.get("description")
+            or rule.get("short_name")
+            or rule.get("violation_reason")
+        )
+        if rule_text:
+            cleaned.append(rule_text.strip())
 
     return cleaned
 
@@ -162,7 +175,7 @@ def lookup_user(username):
     pk = d.get("link_karma", 0)
     ck = d.get("comment_karma", 0)
     total = pk + ck
-    created_utc = d["data"]["created_utc"] if "data" in d else d["created_utc"]
+    created_utc = d.get("created_utc")
 
     return {
         "u": username,
@@ -251,23 +264,32 @@ def build_message(subreddit, subscribers, sub_age, activity_level, posts_per_day
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Hi 👋\nUse /analyze subreddit\nExamples:\n/analyze tressless\n/analyze AskReddit"
+        "Hi 👋\nUse /analyze subreddit\nExamples:\n/analyze r/tressless\n/analyze r/AskReddit"
     )
 
 async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if ALLOWED_USERS and update.effective_user.id not in ALLOWED_USERS:
+        await update.message.reply_text("You are not allowed to use this bot.")
+        return
+
     if not context.args:
-        await update.message.reply_text("Use: /analyze subreddit")
+        await update.message.reply_text("Use: /analyze r/subreddit")
         return
 
     subreddit = clean_subreddit_name(context.args[0])
 
     if not subreddit:
-        await update.message.reply_text("Use: /analyze subreddit")
+        await update.message.reply_text("Use: /analyze r/subreddit")
         return
 
     await update.message.reply_text(f"Working on r/{subreddit}...")
 
-    sub_info = fetch(f"/r/{subreddit}/about.json")
+    # Für echte Subscriber-Zahlen bevorzugt WEB_BASE
+    try:
+        sub_info = _do_get(WEB_BASE, f"/r/{subreddit}/about.json")
+    except Exception:
+        sub_info = fetch(f"/r/{subreddit}/about.json")
+
     if not sub_info or "data" not in sub_info:
         await update.message.reply_text(f"Could not fetch r/{subreddit}")
         return
@@ -283,7 +305,7 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     attach_example_post(lowest, candidate_posts)
     attach_example_post(newest, candidate_posts)
 
-    rules = get_subreddit_rules(subreddit, max_rules=5)
+    rules = get_subreddit_rules(subreddit, max_rules=20)
 
     message = build_message(
         subreddit=subreddit,

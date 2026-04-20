@@ -6,18 +6,16 @@ import html
 import requests
 from datetime import datetime, timezone
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-USER_AGENT = "SubredditAnalyzerTelegram/8.0 (by /u/Aggravating_Lock_666)"
+USER_AGENT = "SubredditAnalyzerTelegram/9.0 (by /u/Aggravating_Lock_666)"
 API_BASE = "https://api.reddit.com"
 WEB_BASE = "https://www.reddit.com"
 SAMPLE_LIMIT = 12
 MIN_POST_AGE_HOURS = 3
 
-# Wenn leer, darf jeder den Bot nutzen.
-# Beispiel:
-# ALLOWED_USERS = [123456789, 987654321]
+# Leer = jeder darf den Bot nutzen
 ALLOWED_USERS = []
 
 def _do_get(base, url, params=None):
@@ -97,7 +95,7 @@ def format_num(n):
     except Exception:
         return "N/A"
 
-def get_subreddit_rules(subreddit, max_rules=20):
+def get_subreddit_rules(subreddit, max_rules=10):
     data = fetch(f"/r/{subreddit}/about/rules.json")
     if not data:
         return []
@@ -107,8 +105,8 @@ def get_subreddit_rules(subreddit, max_rules=20):
 
     for rule in rules[:max_rules]:
         rule_text = (
-            rule.get("description")
-            or rule.get("short_name")
+            rule.get("short_name")
+            or rule.get("description")
             or rule.get("violation_reason")
         )
         if rule_text:
@@ -127,39 +125,46 @@ def get_candidate_posts(subreddit):
     candidates = []
     for item in posts["data"].get("children", []):
         d = item.get("data", {})
+
         created = d.get("created_utc")
         author = d.get("author")
+        removed_by_category = d.get("removed_by_category")
+        selftext = d.get("selftext", "")
+        title = d.get("title", "")
+        is_self = d.get("is_self", False)
+
         if not created or not author or author == "[deleted]":
             continue
+
         if (now_ts - created) < min_age_seconds:
             continue
+
+        # Sichtbar / nicht moderiert entfernt
+        if removed_by_category is not None:
+            continue
+
+        # Textposts mit [removed] rausfiltern
+        if is_self and isinstance(selftext, str) and selftext.strip().lower() == "[removed]":
+            continue
+
+        # Sicherheitshalber kaputte Titel raus
+        if isinstance(title, str) and title.strip().lower() == "[removed]":
+            continue
+
         candidates.append(d)
 
     return candidates
 
-def get_authors_and_activity(subreddit):
+def get_activity(subreddit):
     posts = fetch(f"/r/{subreddit}/new.json", {"limit": SAMPLE_LIMIT})
-    comments = fetch(f"/r/{subreddit}/comments.json", {"limit": SAMPLE_LIMIT})
-
-    authors = set()
     post_times = []
 
     if posts and "data" in posts:
         for item in posts["data"].get("children", []):
             d = item.get("data", {})
-            author = d.get("author")
             created = d.get("created_utc")
-            if author and author != "[deleted]":
-                authors.add(author)
             if created:
                 post_times.append(created)
-
-    if comments and "data" in comments:
-        for item in comments["data"].get("children", []):
-            d = item.get("data", {})
-            author = d.get("author")
-            if author and author != "[deleted]":
-                authors.add(author)
 
     if len(post_times) >= 2:
         hours_span = (max(post_times) - min(post_times)) / 3600
@@ -168,17 +173,17 @@ def get_authors_and_activity(subreddit):
         posts_per_day = 0
 
     if posts_per_day > 50:
-        activity_level = "🔥 VERY ACTIVE"
+        activity_level = "VERY ACTIVE"
     elif posts_per_day > 10:
-        activity_level = "⚡ ACTIVE"
+        activity_level = "ACTIVE"
     elif posts_per_day > 2:
-        activity_level = "🟡 MODERATE"
+        activity_level = "MODERATE"
     elif posts_per_day > 0.5:
-        activity_level = "💤 LOW"
+        activity_level = "LOW"
     else:
-        activity_level = "⚰️ DEAD"
+        activity_level = "DEAD"
 
-    return authors, posts_per_day, activity_level
+    return posts_per_day, activity_level
 
 def lookup_user(username):
     user = fetch(f"/user/{username}/about.json")
@@ -202,86 +207,87 @@ def lookup_user(username):
         "created_utc": created_utc,
         "a": human_age(created_utc),
         "created_date": iso_date(created_utc),
-        "profile_url": f"https://www.reddit.com/user/{username}"
     }
 
-def pick_lowest_and_newest(authors):
+def find_lowest_and_newest_successful_posts(candidate_posts):
     lowest = None
     newest = None
-    lowest_val = float("inf")
-    newest_time = 0
+    lowest_total = float("inf")
+    newest_created = 0
 
-    for username in authors:
+    for post in candidate_posts:
+        username = post.get("author")
+        if not username:
+            continue
+
         info = lookup_user(username)
         if not info:
             continue
 
-        if info["t"] < lowest_val:
-            lowest = info
-            lowest_val = info["t"]
+        result = {
+            "u": info["u"],
+            "t": info["t"],
+            "p": info["p"],
+            "c": info["c"],
+            "created_utc": info["created_utc"],
+            "a": info["a"],
+            "created_date": info["created_date"],
+            "post_title": post.get("title", "N/A"),
+        }
 
-        if info["created_utc"] > newest_time:
-            newest = info
-            newest_time = info["created_utc"]
+        if info["t"] < lowest_total:
+            lowest = result
+            lowest_total = info["t"]
+
+        if info["created_utc"] > newest_created:
+            newest = result
+            newest_created = info["created_utc"]
 
     return lowest, newest
-
-def attach_example_post(user_info, candidate_posts):
-    if not user_info:
-        return
-
-    username = user_info["u"]
-    for post in candidate_posts:
-        if post.get("author") == username:
-            user_info["post_title"] = post.get("title", "N/A")
-            permalink = post.get("permalink")
-            user_info["post_url"] = f"https://www.reddit.com{permalink}" if permalink else None
-            return
 
 def build_message(subreddit, subscribers, sub_age, activity_level, posts_per_day, lowest, newest, rules):
     lines = []
     lines.append(f"📊 <b>Analysis for r/{html.escape(subreddit)}</b>")
     lines.append("")
-    lines.append(f"📈 <b>Activity Status:</b> {html.escape(activity_level)}")
-    lines.append(f"👥 <b>Subscribers:</b> {html.escape(format_num(subscribers))}")
-    lines.append(f"📅 <b>Subreddit age:</b> {html.escape(sub_age)}")
-    lines.append(f"📊 <b>Activity:</b> {html.escape(str(round(posts_per_day, 1)))} posts/day")
+    lines.append("📈 <b>Activity</b>")
+    lines.append(f"• Status: {html.escape(activity_level)}")
+    lines.append(f"• Subscribers: {html.escape(format_num(subscribers))}")
+    lines.append(f"• Age: {html.escape(sub_age)}")
+    lines.append(f"• Posts/day: {html.escape(str(round(posts_per_day, 1)))}")
     lines.append("")
 
     if lowest:
-        lines.append("🏆 <b>Lowest Karma Account:</b>")
-        lines.append(f"💯 <b>Total karma:</b> {lowest['t']}")
-        lines.append(f"⬆️ <b>Post karma:</b> {lowest['p']}")
-        lines.append(f"💬 <b>Comment karma:</b> {lowest['c']}")
-        lines.append(f"👤 <b>User:</b> u/{html.escape(lowest['u'])}")
-        lines.append(f"🗓️ <b>Account age:</b> {html.escape(lowest['a'])} (created on {html.escape(lowest['created_date'])})")
-        if lowest.get("post_title"):
-            lines.append(f"📝 <b>Post:</b> {html.escape(lowest['post_title'])}")
+        lines.append("🏆 <b>Lowest successful visible post</b>")
+        lines.append(f"• Total karma: {lowest['t']}")
+        lines.append(f"• Post karma: {lowest['p']}")
+        lines.append(f"• Comment karma: {lowest['c']}")
+        lines.append(f"• User: u/{html.escape(lowest['u'])}")
+        lines.append(f"• Account age: {html.escape(lowest['a'])} (created on {html.escape(lowest['created_date'])})")
+        lines.append(f"• Post: {html.escape(lowest['post_title'])}")
         lines.append("")
 
     if newest:
-        lines.append("🐣 <b>Newest Account:</b>")
-        lines.append(f"💯 <b>Total karma:</b> {newest['t']}")
-        lines.append(f"⬆️ <b>Post karma:</b> {newest['p']}")
-        lines.append(f"💬 <b>Comment karma:</b> {newest['c']}")
-        lines.append(f"👤 <b>User:</b> u/{html.escape(newest['u'])}")
-        lines.append(f"🗓️ <b>Account age:</b> {html.escape(newest['a'])} (created on {html.escape(newest['created_date'])})")
-        if newest.get("post_title"):
-            lines.append(f"📝 <b>Post:</b> {html.escape(newest['post_title'])}")
+        lines.append("🐣 <b>Newest successful visible post</b>")
+        lines.append(f"• Total karma: {newest['t']}")
+        lines.append(f"• Post karma: {newest['p']}")
+        lines.append(f"• Comment karma: {newest['c']}")
+        lines.append(f"• User: u/{html.escape(newest['u'])}")
+        lines.append(f"• Account age: {html.escape(newest['a'])} (created on {html.escape(newest['created_date'])})")
+        lines.append(f"• Post: {html.escape(newest['post_title'])}")
         lines.append("")
 
     if rules:
-        lines.append("📜 <b>Subreddit Rules:</b>")
+        lines.append("📜 <b>Rules</b>")
         for i, rule in enumerate(rules, 1):
             lines.append(f"{i}. {html.escape(rule)}")
         lines.append("")
 
-    lines.append(f"<i>Based on posts older than {MIN_POST_AGE_HOURS} hours.</i>")
+    lines.append("<i>Observed from visible posts older than 3 hours. These are practical indicators, not guaranteed subreddit limits.</i>")
     return "\n".join(lines)
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Hi 👋\nUse /analyze subreddit\nExamples:\n/analyze r/tressless\n/analyze r/AskReddit"
+        "Hi 👋\nUse /analyze r/subreddit\nExamples:\n/analyze r/tressless\n/analyze r/AskReddit"
     )
 
 async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -302,7 +308,6 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Working on r/{subreddit}...")
 
     sub_info = get_subreddit_info(subreddit)
-
     if not sub_info or "data" not in sub_info:
         await update.message.reply_text(f"Could not fetch r/{subreddit}")
         return
@@ -311,14 +316,10 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     subscribers = s.get("subscribers", "N/A")
     sub_age = human_age(s.get("created_utc"))
 
-    authors, posts_per_day, activity_level = get_authors_and_activity(subreddit)
+    posts_per_day, activity_level = get_activity(subreddit)
     candidate_posts = get_candidate_posts(subreddit)
-    lowest, newest = pick_lowest_and_newest(authors)
-
-    attach_example_post(lowest, candidate_posts)
-    attach_example_post(newest, candidate_posts)
-
-    rules = get_subreddit_rules(subreddit, max_rules=20)
+    lowest, newest = find_lowest_and_newest_successful_posts(candidate_posts)
+    rules = get_subreddit_rules(subreddit, max_rules=10)
 
     message = build_message(
         subreddit=subreddit,
@@ -331,21 +332,10 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rules=rules
     )
 
-    buttons = []
-    if lowest and lowest.get("profile_url"):
-        buttons.append([InlineKeyboardButton(f"👤 View u/{lowest['u']}'s profile", url=lowest["profile_url"])])
-    if newest and newest.get("profile_url"):
-        buttons.append([InlineKeyboardButton(f"👤 View u/{newest['u']}'s profile", url=newest["profile_url"])])
-    if rules:
-        buttons.append([InlineKeyboardButton(f"📜 Open r/{subreddit} rules", url=f"https://www.reddit.com/r/{subreddit}/about/rules")])
-
-    reply_markup = InlineKeyboardMarkup(buttons) if buttons else None
-
     await update.message.reply_text(
         message,
         parse_mode="HTML",
         disable_web_page_preview=True,
-        reply_markup=reply_markup
     )
 
 def main():
